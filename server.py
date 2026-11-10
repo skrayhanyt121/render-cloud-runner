@@ -11,6 +11,7 @@ import subprocess
 import platform
 import logging
 import threading
+import fcntl
 from flask import Flask, request, jsonify, render_template
 from bundle_manager import unpack_bundle
 
@@ -31,29 +32,67 @@ PORT = int(os.environ.get("PORT", 5050))
 START_TIME = time.time()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 24/7 BACKGROUND FACEBOOK AI BOT WORKER
+# 24/7 BACKGROUND FACEBOOK AI BOT WORKER (SINGLE-INSTANCE LOCKED)
 # ─────────────────────────────────────────────────────────────────────────────
+BOT_LOCK_FILE = "/tmp/facebook_bot_worker.lock"
+_bot_lock_fp = None
 _BOT_THREAD = None
 _BOT_ENGINE = None
 _BOT_ERROR = None
 
+def acquire_bot_worker_lock() -> bool:
+    """Acquire an exclusive non-blocking file lock so only 1 process ever runs the bot."""
+    global _bot_lock_fp
+    try:
+        _bot_lock_fp = open(BOT_LOCK_FILE, "a+")
+        fcntl.flock(_bot_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _bot_lock_fp.seek(0)
+        _bot_lock_fp.truncate()
+        _bot_lock_fp.write(str(os.getpid()))
+        _bot_lock_fp.flush()
+        return True
+    except (BlockingIOError, IOError):
+        return False
+
+def is_bot_active() -> bool:
+    """Check if the bot worker is active either in this process or in another locked worker."""
+    if _BOT_THREAD is not None and _BOT_THREAD.is_alive():
+        return True
+    if os.path.exists(BOT_LOCK_FILE):
+        try:
+            with open(BOT_LOCK_FILE, "r") as f:
+                pid_str = f.read().strip()
+                if pid_str and pid_str.isdigit():
+                    pid = int(pid_str)
+                    os.kill(pid, 0)
+                    return True
+        except (OSError, ValueError):
+            pass
+    return False
+
 def run_facebook_bot():
     global _BOT_ENGINE, _BOT_ERROR
-    logger.info("🚀 Launching FastMessengerEngine inside Render background thread...")
+    if not acquire_bot_worker_lock():
+        logger.info(f"🔒 PID {os.getpid()}: Another Gunicorn worker process already acquired the bot lock. Skipping bot thread in this worker.")
+        return
+
+    logger.info(f"🚀 [PID {os.getpid()}] Acquired bot lock! Launching FastMessengerEngine inside Render background thread...")
     try:
         _BOT_ENGINE = fast_messenger_bot.FastMessengerEngine()
-        logger.info("✅ FastMessengerEngine initialized successfully! Starting polling loop...")
+        logger.info(f"✅ [PID {os.getpid()}] FastMessengerEngine initialized successfully! Starting polling loop...")
         _BOT_ENGINE.run_forever()
     except Exception as e:
         _BOT_ERROR = str(e)
-        logger.error(f"❌ Facebook Bot Worker crashed: {e}", exc_info=True)
+        logger.error(f"❌ [PID {os.getpid()}] Facebook Bot Worker crashed: {e}", exc_info=True)
 
 def ensure_bot_running():
     global _BOT_THREAD
+    if is_bot_active():
+        return
     if _BOT_THREAD is None or not _BOT_THREAD.is_alive():
         _BOT_THREAD = threading.Thread(target=run_facebook_bot, daemon=True, name="FacebookBotWorker")
         _BOT_THREAD.start()
-        logger.info("Started FacebookBotWorker daemon thread.")
+        logger.info(f"Started FacebookBotWorker daemon thread in PID {os.getpid()}.")
 
 # Auto-start bot on server initialization
 ensure_bot_running()
@@ -99,7 +138,7 @@ def index():
     """Server status & test interface."""
     stats = get_system_stats()
     ensure_bot_running()
-    bot_alive = _BOT_THREAD is not None and _BOT_THREAD.is_alive()
+    bot_alive = is_bot_active()
     return render_template(
         "dashboard.html",
         stats=stats,
@@ -112,7 +151,7 @@ def index():
 def health():
     """Public health check endpoint designed specifically for UptimeRobot."""
     ensure_bot_running()
-    bot_alive = _BOT_THREAD is not None and _BOT_THREAD.is_alive()
+    bot_alive = is_bot_active()
     return jsonify({
         "status": "online",
         "service": "facebook-ai-commander-bot",

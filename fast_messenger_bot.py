@@ -165,8 +165,11 @@ class FastMessengerEngine:
         return set()
 
     def _save_cache(self):
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(self.replied_ids), f, indent=2)
+        try:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(list(self.replied_ids)[-500:], f, indent=2)
+        except Exception:
+            pass
 
     def send_typing_indicator(self, recipient_id: str):
         """Send instant 'typing_on' bubble (sub-200ms)."""
@@ -403,6 +406,20 @@ class FastMessengerEngine:
 
                 if msg_id in self.replied_ids:
                     continue
+
+                # Ignore messages older than 10 minutes to avoid replying to old history on restarts
+                created_time_str = latest_msg.get("created_time")
+                if created_time_str:
+                    try:
+                        from datetime import datetime, timezone
+                        clean_ts = created_time_str.replace("+0000", "+00:00")
+                        msg_time = datetime.fromisoformat(clean_ts)
+                        age_sec = (datetime.now(timezone.utc) - msg_time).total_seconds()
+                        if age_sec > 600:
+                            self.replied_ids.add(msg_id)
+                            continue
+                    except Exception:
+                        pass
 
                 # Extract attachments (video, image) if any
                 attachments = latest_msg.get("attachments", {}).get("data", [])
