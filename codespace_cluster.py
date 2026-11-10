@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger("CodespaceCluster")
 
-POOL_PATH = "/root/facebook-ai-bot/codespaces_pool.json"
+POOL_PATH = os.path.join(os.path.dirname(__file__), "codespaces_pool.json")
 
 class CodespaceClusterManager:
     def __init__(self, config_path: str = POOL_PATH):
