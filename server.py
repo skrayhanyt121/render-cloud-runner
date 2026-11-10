@@ -17,6 +17,9 @@ from bundle_manager import unpack_bundle
 # Unpack bundled credentials if running in a fresh container (e.g. Render)
 unpack_bundle()
 
+# Synchronously import bot engine before spawning thread to avoid import race conditions
+import fast_messenger_bot
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("RenderServer")
 
@@ -38,8 +41,7 @@ def run_facebook_bot():
     global _BOT_ENGINE, _BOT_ERROR
     logger.info("🚀 Launching FastMessengerEngine inside Render background thread...")
     try:
-        from fast_messenger_bot import FastMessengerEngine
-        _BOT_ENGINE = FastMessengerEngine()
+        _BOT_ENGINE = fast_messenger_bot.FastMessengerEngine()
         logger.info("✅ FastMessengerEngine initialized successfully! Starting polling loop...")
         _BOT_ENGINE.run_forever()
     except Exception as e:
