@@ -92,6 +92,14 @@ class CommandLoader:
                     target_name = self.aliases.get(cmd_name, cmd_name)
                     args = ""
 
+        # 3b. Natural language help & command list triggers (e.g. "help cmd dekhaw", "commands list")
+        if not target_name:
+            norm_lower = text_clean.lower()
+            if any(h in norm_lower for h in ("help cmd", "cmd help", "help dekhaw", "help dekhao", "commands dekhaw", "commands list", "command list", "cmd list", "ki ki command")):
+                cmd_name = "help"
+                target_name = "help"
+                args = ""
+
         # 4. Execute registered direct command if matched
         if target_name in self.commands:
             mod = self.commands[target_name]
@@ -136,6 +144,10 @@ class CommandLoader:
                 reply, img = mod.on_execute(ctx)
                 if reply and credit_notice:
                     reply += credit_notice
+                if reply:
+                    db.add_chat_message(sender_id, "user", text_clean)
+                    # Store compact representation in history so AI agent has full context
+                    db.add_chat_message(sender_id, "assistant", reply[:350])
                 return reply, img
             except Exception as e:
                 logger.error(f"Error executing command .{target_name}: {e}")

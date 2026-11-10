@@ -2,21 +2,15 @@ import os
 import json
 import random
 import logging
-from typing import List, Optional
-try:
-    from curl_cffi import requests
-except ImportError:
-    import requests
+import urllib.request
+import urllib.error
+from typing import List, Optional, Dict, Any
 
 logger = logging.getLogger("GeminiKeyManager")
 KEYS_FILE = os.path.join(os.path.dirname(__file__), "gemini_keys.json")
 
 class GeminiKeyManager:
     def __init__(self):
-        try:
-            self.session = requests.Session(impersonate="chrome124")
-        except Exception:
-            self.session = requests.Session()
         self.keys: List[str] = self.load_keys()
         self.current_index = 0
 
@@ -46,53 +40,98 @@ class GeminiKeyManager:
         self.current_index = (self.current_index + 1) % len(self.keys)
         return key
 
-    def generate(self, prompt: str, user_name: str = "User") -> str:
-        """Generate response via official Gemini Flash API or ultra-fast instant fallback."""
-        key = self.get_next_key()
-        if key:
-            # Check if this is an autonomous agent prompt with tools
-            if "You are \"AI Commander Agent\"" in prompt or "AVAILABLE TOOLS:" in prompt:
-                call_text = prompt
-            else:
-                call_text = (
-                    f"You are AI Commander Bot, an intelligent, helpful, and friendly Facebook Messenger Assistant.\n"
-                    f"User: {user_name}\n"
-                    f"Message: \"{prompt}\"\n"
-                    f"STRICT LANGUAGE RULE: ALWAYS reply in Banglish (Bengali written in English/Latin letters, e.g. 'Ami bhalo achi Mamun bhai, apnar ki khobor?'). NEVER use Bengali script.\n"
-                    f"Keep it concise (1-3 natural sentences), helpful, with 1-2 emojis.\n"
-                    f"Return ONLY the response text."
-                )
+    def generate(
+        self,
+        prompt: str,
+        user_name: str = "User",
+        history: Optional[List[Dict[str, str]]] = None,
+        system_instruction: Optional[str] = None
+    ) -> str:
+        """
+        Generate response via official Gemini Flash API with multi-turn conversation memory,
+        automatic key rotation, and resilient fallback.
+        """
+        if not self.keys:
+            return self._instant_fallback(prompt, user_name)
 
-            # Call official Gemini Flash REST API (Takes 200-300ms!)
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
-            payload = {
-                "contents": [
-                    {
-                        "parts": [
-                            {"text": call_text}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.5,
-                    "maxOutputTokens": 800,
-                    "thinkingConfig": {"thinkingBudget": 0}
-                }
+        # Build clean alternating multi-turn contents
+        contents = []
+        if history:
+            for turn in history:
+                role = "user" if turn.get("role") == "user" else "model"
+                text = turn.get("content", "").strip()
+                if not text:
+                    continue
+                # Merge consecutive turns of identical role
+                if contents and contents[-1]["role"] == role:
+                    contents[-1]["parts"][0]["text"] += f"\n{text}"
+                else:
+                    contents.append({"role": role, "parts": [{"text": text}]})
+
+            # Ensure first turn is from user
+            if contents and contents[0]["role"] != "user":
+                contents.pop(0)
+
+        # Append current prompt
+        clean_prompt = prompt.strip()
+        if contents and contents[-1]["role"] == "user":
+            contents[-1]["parts"][0]["text"] += f"\n{clean_prompt}"
+        else:
+            contents.append({"role": "user", "parts": [{"text": clean_prompt}]})
+
+        # Base payload
+        payload: Dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.5,
+                "maxOutputTokens": 800
             }
-            try:
-                r = self.session.post(url, json=payload, timeout=4)
-                if r.status_code == 200:
-                    data = r.json()
-                    candidates = data.get("candidates", [])
-                    if candidates:
-                        text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                        if text:
-                            return text.strip()
-                logger.warning(f"Key call returned {r.status_code}: {r.text[:120]}")
-            except Exception as e:
-                logger.error(f"Gemini API Key call error: {e}")
+        }
 
-        # Ultra-fast Instant Heuristic Engine (< 10ms response time!)
+        # Optional System Instruction
+        if system_instruction:
+            payload["systemInstruction"] = {
+                "parts": [{"text": system_instruction}]
+            }
+
+        # Try available keys with automatic rotation on rate-limit / network error
+        num_attempts = max(1, len(self.keys))
+        for attempt in range(num_attempts):
+            key = self.get_next_key()
+            if not key:
+                break
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
+            try:
+                body = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        candidates = data.get("candidates", [])
+                        if candidates:
+                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                            if text:
+                                return text.strip()
+            except urllib.error.HTTPError as he:
+                err_text = ""
+                try:
+                    err_text = he.read().decode("utf-8")[:160]
+                except Exception:
+                    pass
+                logger.warning(f"Gemini Key [attempt {attempt+1}] returned HTTP {he.code}: {err_text}")
+                if he.code in (429, 403):
+                    # Rate limit or quota exceeded, try next key immediately
+                    continue
+            except Exception as e:
+                logger.error(f"Gemini API call failed [attempt {attempt+1}]: {e}")
+
+        # Fallback if all API keys fail
         return self._instant_fallback(prompt, user_name)
 
     def _instant_fallback(self, prompt: str, user_name: str) -> str:
@@ -100,17 +139,19 @@ class GeminiKeyManager:
         greetings = ("hi", "hello", "hey", "salam", "assalamualaikum", "kemon acho", "ki khobor", "yo")
         if any(p.startswith(g) or p == g for g in greetings):
             options = [
-                f"Hello {user_name} bhai! 👋 Ami AI Commander Bot. Ki bhabe help korte pari bolun? 🚀",
-                f"Hey {user_name}! 👋 Shob kisu kemon cholche? Commands dekhte .help likhun!",
-                f"Walaikum Assalam {user_name} bhai! ❤️ Ajke apnar jonno ki korte pari?",
-                f"Hi {user_name}! 🤖 Ami 24/7 online achi apnake support dite!"
+                f"Hello {user_name} bhai! 👋 Shob kisu kemon cholche?",
+                f"Hey {user_name}! 👋 Bolun apnar jonno ajke ki korte pari?",
+                f"Walaikum Assalam {user_name} bhai! ❤️ Kemon achen?",
+                f"Hi {user_name}! 🤖 Ami online achi, kono help lagle janan!"
             ]
             return random.choice(options)
-        elif "ki korte paro" in p or "help" in p:
-            return f"Ami apnake anek bhabe help korte pari {user_name} bhai! 🎨 AI photo banano (.img <prompt>), ⛅ weather check (.weather Dhaka), 🎰 games (.slot) ebong aro onek kisu! Type korun .help!"
+        elif "ki korte paro" in p:
+            return f"Ami Codespace VM control (.cloudstatus), video edit (Reels 9:16), disposable Gmail (.gmail), AI image (.img), Facebook post ebong aro onnek kisu korte pari {user_name} bhai! Shob details dekhte `.help` likhun! 🚀"
+        elif "help" in p or "cmd" in p:
+            return f"Shob commands ebong features dekhte `.help` ba `.menu` likhun {user_name} bhai!"
         elif "dhonnobad" in p or "thanks" in p or "thank you" in p:
-            return f"You're most welcome, {user_name} bhai! ❤️ Shobshomoy pashe achi."
+            return f"You're welcome, {user_name} bhai! ❤️ Shobshomoy pashe achi."
         else:
-            return f"Ji {user_name} bhai! Ami apnar kotha bujhte perechi. Apnar proshno niye kono specific help lagle janan ba '.help' likhe shob commands dekhe nin! 🚀"
+            return f"Ji {user_name} bhai! Ami apnar kotha bujhte perechi. Apnar proshno niye kono specific command use korte paren ba '.help' likhe shob commands dekhe nin! 🚀"
 
 gemini_manager = GeminiKeyManager()

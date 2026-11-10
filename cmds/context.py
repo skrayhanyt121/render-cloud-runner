@@ -58,6 +58,16 @@ class Database:
                     updated_at INTEGER
                 )
             """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS conversation_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT,
+                    role TEXT,
+                    content TEXT,
+                    timestamp INTEGER
+                )
+            """)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversation_history(user_id, timestamp)")
 
             # Auto-migrate columns if table already existed without them
             for col, col_type in [
@@ -279,6 +289,51 @@ class Database:
                 except Exception:
                     pass
             return []
+
+    # ─────────────────────────────────────────────────────────────
+    # MULTI-TURN CONVERSATION MEMORY
+    # ─────────────────────────────────────────────────────────────
+    def add_chat_message(self, user_id: str, role: str, content: str):
+        """Record chat message for multi-turn conversational context."""
+        uid = str(user_id).strip()
+        msg = str(content).strip()
+        if not uid or not msg:
+            return
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO conversation_history (user_id, role, content, timestamp)
+                VALUES (?, ?, ?, ?)
+            """, (uid, role, msg, int(time.time())))
+            # Maintain sliding window of last 20 messages per user
+            cur.execute("""
+                DELETE FROM conversation_history
+                WHERE user_id = ? AND id NOT IN (
+                    SELECT id FROM conversation_history
+                    WHERE user_id = ?
+                    ORDER BY id DESC LIMIT 20
+                )
+            """, (uid, uid))
+
+    def get_recent_chat_history(self, user_id: str, limit: int = 10) -> List[Dict[str, str]]:
+        """Retrieve recent conversation history in chronological order."""
+        uid = str(user_id).strip()
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("""
+                SELECT role, content FROM conversation_history
+                WHERE user_id = ?
+                ORDER BY id DESC LIMIT ?
+            """, (uid, limit))
+            rows = cur.fetchall()
+            return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+    def clear_chat_history(self, user_id: str):
+        """Clear conversation history for a specific user."""
+        uid = str(user_id).strip()
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM conversation_history WHERE user_id = ?", (uid,))
 
 db = Database()
 

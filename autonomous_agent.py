@@ -58,6 +58,8 @@ AVAILABLE TOOLS:
   params: {"target_uid": "<uid>", "amount": <number>}
 - "get_user_info": Get Facebook UID, role, and credits for a user.
   params: {"target_uid": "<uid_or_null>"}
+- "show_help": Show the complete bot commands and features menu. Use whenever the user asks for help menu, command list, or says 'help cmd dekhaw', 'ki ki command ache', 'commands list dao', 'help dekhao', 'ki ki korte paro'.
+  params: {}
 - "system_stats": Get bot server RAM, CPU, ping and uptime.
   params: {}
 
@@ -97,72 +99,62 @@ class AutonomousAIAgent:
         self.last_user_videos: Dict[str, str] = {}
 
     def process_message(self, text: str, sender_id: str, sender_name: str, video_url: Optional[str] = None) -> Tuple[str, Optional[str]]:
-        """Processes message through the Autonomous Agent reasoning loop."""
+        """Processes message through the Autonomous Agent reasoning loop with persistent multi-turn memory."""
+        text_clean = text.strip()
         if video_url:
             self.last_user_videos[sender_id] = video_url
+
+        # 1. Record incoming user message in conversation history
+        db.add_chat_message(sender_id, "user", text_clean)
+
+        # 2. Retrieve recent chat history (exclude current message)
+        history = db.get_recent_chat_history(sender_id, limit=8)
+        history = history[:-1] if history else []
 
         is_admin = db.is_admin(sender_id)
         is_super = db.is_super_admin(sender_id)
         credits = db.get_credits(sender_id)
         user_email = db.get_user_email(sender_id) or "None"
+        cached_video = self.last_user_videos.get(sender_id, "None")
 
-        context_header = (
+        context_prompt = (
             f"[USER CONTEXT: Name={sender_name}, UID={sender_id}, IsAdmin={is_admin}, "
-            f"IsSuperAdmin={is_super}, Credits={credits}, ActiveGmail={user_email}]\n"
-            f"User Message: {text}"
+            f"IsSuperAdmin={is_super}, Credits={credits}, ActiveGmail={user_email}, LastVideoProvided={cached_video}]\n"
+            f"User Message: {text_clean}"
         )
 
-        # 1. Ask LLM to reason and pick tool or direct answer
-        raw_llm_reply = self._call_llm(context_header, sender_name)
+        # 3. Call Gemini with multi-turn conversation memory and system instruction
+        raw_llm_reply = gemini_manager.generate(
+            prompt=context_prompt,
+            user_name=sender_name,
+            history=history,
+            system_instruction=AGENT_SYSTEM_PROMPT
+        )
         
-        # 2. Check if LLM requested a tool execution
+        # 4. Check if LLM requested a tool execution
         tool_call, intro_prefix = self._extract_json_tool(raw_llm_reply)
         if not tool_call:
             # Direct conversational reply
-            return sanitize_banglish(raw_llm_reply), None
+            reply = sanitize_banglish(raw_llm_reply)
+            db.add_chat_message(sender_id, "assistant", reply)
+            return reply, None
 
         action = tool_call.get("action", "")
         params = tool_call.get("params", {})
+        # If edit_video is triggered without explicit url, check cached video
+        if action == "edit_video" and not params.get("video_url") and sender_id in self.last_user_videos:
+            params["video_url"] = self.last_user_videos[sender_id]
+
         logger.info(f"AI Agent executing tool: {action} with params {params}")
 
-        # 3. Execute tool with permission checks
+        # 5. Execute tool with permission checks
         reply_text, img_url = self._execute_tool(action, params, sender_id, sender_name, is_admin)
         if intro_prefix:
             reply_text = f"{intro_prefix}\n\n{reply_text}"
-        return sanitize_banglish(reply_text), img_url
-
-    def _call_llm(self, prompt: str, user_name: str) -> str:
-        url = "http://localhost:8787/v1/chat/completions"
-        payload = {
-            "model": "auto",
-            "messages": [
-                {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.5,
-            "max_tokens": 800
-        }
-
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": "Bearer 99c6b16647de712b86b23d215d5c0432073ab9ee76cc776b73a30257098bbaba",
-                    "User-Agent": "AIAgent/3.0"
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=18) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                choices = data.get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "").strip()
-        except Exception as e:
-            logger.warning(f"Gateway failed for AI Agent ({e}), using direct Gemini fallback...")
-
-        return gemini_manager.generate(f"{AGENT_SYSTEM_PROMPT}\n\n{prompt}", user_name)
+        
+        final_reply = sanitize_banglish(reply_text)
+        db.add_chat_message(sender_id, "assistant", final_reply)
+        return final_reply, img_url
 
     def _extract_json_tool(self, text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         intro = ""
@@ -488,7 +480,25 @@ class AutonomousAIAgent:
             )
 
         # ─────────────────────────────────────────────────────────────
-        # TOOL 11: SYSTEM STATS
+        # TOOL 11: SHOW HELP / COMMANDS MENU
+        # ─────────────────────────────────────────────────────────────
+        if action == "show_help":
+            from cmds import help as help_cmd_mod
+            from cmds.context import CommandContext
+            ctx = CommandContext(
+                sender_id=sender_id,
+                sender_name=sender_name,
+                raw_text="help",
+                args="",
+                is_group=False,
+                thread_id=sender_id,
+                fb_api=self.fb,
+                cmd_name="help"
+            )
+            return help_cmd_mod.on_execute(ctx)
+
+        # ─────────────────────────────────────────────────────────────
+        # TOOL 12: SYSTEM STATS
         # ─────────────────────────────────────────────────────────────
         if action == "system_stats":
             cs_state = cluster_manager.get_state()
