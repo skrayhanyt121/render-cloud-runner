@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+replied_messages.json
+replied_comments.json
+tmp/
+config.json
+codespaces_pool.json
+user_api_keys.json
+gemini_keys.json
+commander_db.sqlite

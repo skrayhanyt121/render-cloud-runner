@@ -35,6 +35,33 @@
     .dot { width: 8px; height: 8px; background: var(--green); border-radius: 50%; box-shadow: 0 0 10px var(--green); }
     .title { font-size: 2.2rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 0.4rem; }
     .subtitle { color: #94a3b8; font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="badge">
+        <span class="dot"></span> Render Cloud Service Online
+      </div>
+      <h1 class="title">Render Cloud Runner & AI Bot</h1>
+      <p class="subtitle">24/7 Autonomous Facebook AI Bot & High-Performance Cloud Execution Bridge</p>
+    </div>
+
+    <!-- Facebook Bot Live Status Card -->
+    <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+      <div>
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+          <span style="width: 10px; height: 10px; background: {% if bot_alive %}#10b981{% else %}#f59e0b{% endif %}; border-radius: 50%; box-shadow: 0 0 10px {% if bot_alive %}#10b981{% else %}#f59e0b{% endif %};"></span>
+          <strong style="color: {% if bot_alive %}#10b981{% else %}#f59e0b{% endif %}; font-size: 1.05rem;">Facebook AI Bot: {% if bot_alive %}ACTIVE & ONLINE (24/7 Polling){% else %}INITIALIZING / STANDBY{% endif %}</strong>
+        </div>
+        <div style="font-size: 0.85rem; color: #94a3b8;">Controlling Page: <strong>AI Commander Bot</strong> (ID: <code>1489379004255673</code>)</div>
+      </div>
+      <div>
+        <a href="/api/health" target="_blank" style="background: #1877f2; color: #fff; text-decoration: none; padding: 8px 16px; border-radius: 8px; font-weight: 700; font-size: 0.85rem; display: inline-flex; align-items: center; gap: 6px;">
+          ⏱️ UptimeRobot Keep-Alive Endpoint
+        </a>
+      </div>
+    </div>
 
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
     .card {

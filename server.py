@@ -1,7 +1,7 @@
 """
-Render Cloud Runner & Remote Task Server
-A high-performance remote compute bridge allowing authenticated execution
-of Python scripts, background jobs, and automation directly on Render.
+Render Cloud Runner & Facebook AI Commander Bot Server
+A high-performance remote compute bridge and 24/7 autonomous Facebook AI bot
+deployed directly on Render with UptimeRobot continuous keep-alive.
 """
 
 import os
@@ -9,7 +9,16 @@ import sys
 import time
 import subprocess
 import platform
+import logging
+import threading
 from flask import Flask, request, jsonify, render_template
+from bundle_manager import unpack_bundle
+
+# Unpack bundled credentials if running in a fresh container (e.g. Render)
+unpack_bundle()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger("RenderServer")
 
 app = Flask(__name__)
 
@@ -18,6 +27,34 @@ RUNNER_SECRET = os.environ.get("RUNNER_SECRET_KEY", "antigravity_cloud_master_20
 PORT = int(os.environ.get("PORT", 5050))
 START_TIME = time.time()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 24/7 BACKGROUND FACEBOOK AI BOT WORKER
+# ─────────────────────────────────────────────────────────────────────────────
+_BOT_THREAD = None
+_BOT_ENGINE = None
+_BOT_ERROR = None
+
+def run_facebook_bot():
+    global _BOT_ENGINE, _BOT_ERROR
+    logger.info("🚀 Launching FastMessengerEngine inside Render background thread...")
+    try:
+        from fast_messenger_bot import FastMessengerEngine
+        _BOT_ENGINE = FastMessengerEngine()
+        logger.info("✅ FastMessengerEngine initialized successfully! Starting polling loop...")
+        _BOT_ENGINE.run_forever()
+    except Exception as e:
+        _BOT_ERROR = str(e)
+        logger.error(f"❌ Facebook Bot Worker crashed: {e}", exc_info=True)
+
+def ensure_bot_running():
+    global _BOT_THREAD
+    if _BOT_THREAD is None or not _BOT_THREAD.is_alive():
+        _BOT_THREAD = threading.Thread(target=run_facebook_bot, daemon=True, name="FacebookBotWorker")
+        _BOT_THREAD.start()
+        logger.info("Started FacebookBotWorker daemon thread.")
+
+# Auto-start bot on server initialization
+ensure_bot_running()
 
 def check_auth():
     """Verify request authorization."""
@@ -25,7 +62,6 @@ def check_auth():
     if token.startswith("Bearer "):
         token = token[7:]
     return token == RUNNER_SECRET
-
 
 def get_system_stats():
     """Gather system metrics (RAM, OS, CPU, Uptime)."""
@@ -56,23 +92,40 @@ def get_system_stats():
             "os": f"{platform.system()} {platform.release()}",
         }
 
-
 @app.route("/")
 def index():
     """Server status & test interface."""
     stats = get_system_stats()
-    return render_template("dashboard.html", stats=stats, secret=RUNNER_SECRET)
-
+    ensure_bot_running()
+    bot_alive = _BOT_THREAD is not None and _BOT_THREAD.is_alive()
+    return render_template(
+        "dashboard.html",
+        stats=stats,
+        secret=RUNNER_SECRET,
+        bot_alive=bot_alive,
+        bot_error=_BOT_ERROR
+    )
 
 @app.route("/api/health", methods=["GET"])
 def health():
-    """Public health check."""
+    """Public health check endpoint designed specifically for UptimeRobot."""
+    ensure_bot_running()
+    bot_alive = _BOT_THREAD is not None and _BOT_THREAD.is_alive()
     return jsonify({
         "status": "online",
-        "service": "render-cloud-runner",
+        "service": "facebook-ai-commander-bot",
+        "bot_worker": "active" if bot_alive else "crashed",
+        "bot_error": _BOT_ERROR,
+        "page_name": "AI Commander Bot",
+        "page_id": "1489379004255673",
+        "uptimerobot_keepalive_target": "https://render-cloud-runner.onrender.com/api/health",
         "system": get_system_stats()
-    })
+    }), 200
 
+@app.route("/api/ping", methods=["GET"])
+def ping():
+    """Ultra-fast lightweight ping."""
+    return "pong", 200
 
 @app.route("/api/execute", methods=["POST"])
 def execute():
@@ -89,83 +142,35 @@ def execute():
         return jsonify({"error": "No code provided to execute."}), 400
 
     start_exec = time.time()
-
     try:
         if exec_type == "python":
-            # Run inline python code
             cmd = [sys.executable, "-c", code]
         else:
-            # Run bash shell command
             cmd = ["/bin/bash", "-c", code]
 
-        proc = subprocess.run(
+        res = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=timeout,
-            cwd="/tmp"
+            cwd=os.path.dirname(__file__)
         )
-        duration = round(time.time() - start_exec, 3)
 
         return jsonify({
-            "success": proc.returncode == 0,
-            "exit_code": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "execution_time_sec": duration,
+            "exit_code": res.returncode,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "execution_time_sec": round(time.time() - start_exec, 3),
         })
 
     except subprocess.TimeoutExpired:
         return jsonify({
-            "success": False,
-            "error": f"Execution timed out after {timeout} seconds.",
-            "execution_time_sec": timeout,
-        }), 408
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e),
+            "error": f"Command timed out after {timeout} seconds.",
             "execution_time_sec": round(time.time() - start_exec, 3),
-        }), 500
-
-
-@app.route("/api/clone_and_run", methods=["POST"])
-def clone_and_run():
-    """Clone a GitHub repository and run a background task."""
-    if not check_auth():
-        return jsonify({"error": "Unauthorized."}), 401
-
-    data = request.get_json(silent=True) or {}
-    repo_url = data.get("repo_url", "").strip()
-    run_cmd = data.get("cmd", "python3 main.py").strip()
-
-    if not repo_url:
-        return jsonify({"error": "repo_url required"}), 400
-
-    repo_name = repo_url.split("/")[-1].replace(".git", "")
-    target_dir = f"/tmp/{repo_name}_{int(time.time())}"
-
-    # Clone
-    clone_cmd = f"git clone --depth 1 {repo_url} {target_dir} && cd {target_dir} && {run_cmd}"
-    try:
-        proc = subprocess.run(
-            ["/bin/bash", "-c", clone_cmd],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=120
-        )
-        return jsonify({
-            "success": proc.returncode == 0,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-            "target_dir": target_dir
-        })
+        }), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 if __name__ == "__main__":
-    print(f"[*] Starting Render Cloud Runner on port {PORT}...")
     app.run(host="0.0.0.0", port=PORT)
