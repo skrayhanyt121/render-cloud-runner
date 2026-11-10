@@ -51,22 +51,23 @@ def get_bot_heartbeat_age() -> float:
     return -1.0
 
 def is_bot_active() -> bool:
-    """Check if bot subprocess is alive and sending heartbeats."""
-    global BOT_PROCESS
-    if BOT_PROCESS is None or BOT_PROCESS.poll() is not None:
-        return False
+    """Check if bot subprocess is alive and sending regular heartbeats."""
     age = get_bot_heartbeat_age()
-    if age >= 0 and age > 35.0:
-        return False
-    return True
+    return age >= 0 and age <= 30.0
 
 def ensure_bot_running():
     """Ensure bot subprocess is alive and responsive. Restart if dead or stalled."""
     global BOT_PROCESS, _BOT_ERROR
+
+    # 1. If any active bot process is already beating cleanly, do nothing!
+    age = get_bot_heartbeat_age()
+    if age >= 0 and age < 25.0:
+        return
+
+    # 2. If we hold a reference to a dead or stalled process, clean it up
     if BOT_PROCESS is not None:
         if BOT_PROCESS.poll() is None:
-            age = get_bot_heartbeat_age()
-            if age >= 0 and age > 35.0:
+            if age >= 0 and age > 30.0:
                 logger.warning(f"⚠️ Bot heartbeat stalled ({age:.1f}s ago). Terminating PID {BOT_PROCESS.pid}...")
                 try:
                     BOT_PROCESS.kill()
@@ -74,10 +75,7 @@ def ensure_bot_running():
                 except Exception:
                     pass
                 BOT_PROCESS = None
-            else:
-                return  # Bot is alive and healthy
         else:
-            logger.warning(f"⚠️ Bot process exited with code {BOT_PROCESS.returncode}. Restarting...")
             BOT_PROCESS = None
 
     try:
@@ -159,6 +157,19 @@ def index():
         bot_error=_BOT_ERROR
     )
 
+def get_bot_pid():
+    if BOT_PROCESS and BOT_PROCESS.poll() is None:
+        return BOT_PROCESS.pid
+    if os.path.exists("/tmp/fast_messenger_bot.lock"):
+        try:
+            with open("/tmp/fast_messenger_bot.lock") as f:
+                p = f.read().strip()
+                if p.isdigit():
+                    return int(p)
+        except Exception:
+            pass
+    return None
+
 @app.route("/api/health", methods=["GET"])
 def health():
     """Public health check endpoint designed specifically for UptimeRobot."""
@@ -168,7 +179,7 @@ def health():
         "status": "online",
         "service": "facebook-ai-commander-bot",
         "bot_worker": "active" if bot_alive else "crashed",
-        "bot_pid": BOT_PROCESS.pid if BOT_PROCESS and BOT_PROCESS.poll() is None else None,
+        "bot_pid": get_bot_pid(),
         "bot_heartbeat_age_sec": round(get_bot_heartbeat_age(), 1),
         "bot_error": _BOT_ERROR,
         "page_name": "AI Commander Bot",
