@@ -68,6 +68,14 @@ class Database:
                 )
             """)
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_user ON conversation_history(user_id, timestamp)")
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_last_media (
+                    user_id TEXT PRIMARY KEY,
+                    image_url TEXT,
+                    video_url TEXT,
+                    updated_at INTEGER
+                )
+            """)
 
             # Auto-migrate columns if table already existed without them
             for col, col_type in [
@@ -334,6 +342,41 @@ class Database:
         with self.conn:
             cur = self.conn.cursor()
             cur.execute("DELETE FROM conversation_history WHERE user_id = ?", (uid,))
+
+    def set_last_media(self, user_id: str, image_url: Optional[str] = None, video_url: Optional[str] = None):
+        """Persist latest user image or video attachment URL."""
+        uid = str(user_id).strip()
+        if not uid:
+            return
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("SELECT image_url, video_url FROM user_last_media WHERE user_id = ?", (uid,))
+            row = cur.fetchone()
+            curr_img = row[0] if row else None
+            curr_vid = row[1] if row else None
+            
+            new_img = image_url if image_url else curr_img
+            new_vid = video_url if video_url else curr_vid
+            
+            cur.execute("""
+                INSERT INTO user_last_media (user_id, image_url, video_url, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    image_url = excluded.image_url,
+                    video_url = excluded.video_url,
+                    updated_at = excluded.updated_at
+            """, (uid, new_img, new_vid, int(time.time())))
+
+    def get_last_media(self, user_id: str) -> Dict[str, Optional[str]]:
+        """Retrieve latest image and video URL for a user."""
+        uid = str(user_id).strip()
+        with self.conn:
+            cur = self.conn.cursor()
+            cur.execute("SELECT image_url, video_url FROM user_last_media WHERE user_id = ?", (uid,))
+            row = cur.fetchone()
+            if row:
+                return {"image_url": row[0], "video_url": row[1]}
+        return {"image_url": None, "video_url": None}
 
 db = Database()
 

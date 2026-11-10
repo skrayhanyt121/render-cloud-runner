@@ -11,7 +11,7 @@ from autonomous_agent import AutonomousAIAgent
 logger = logging.getLogger("CommandLoader")
 
 # Commands that are safe to trigger as standalone single words without dot prefix
-STANDALONE_NO_PREFIX_CMDS = {"help", "menu", "slot", "daily", "balance", "top", "inbox", "gmail", "gamil", "uid", "credits"}
+STANDALONE_NO_PREFIX_CMDS = {"help", "menu", "slot", "daily", "balance", "top", "inbox", "gmail", "gamil", "uid", "credits", "edit"}
 
 class CommandLoader:
     def __init__(self, fb_api):
@@ -55,9 +55,17 @@ class CommandLoader:
         logger.info(f"Successfully loaded {len(self.commands)} modular commands!")
 
     def dispatch(self, text: str, sender_id: str, sender_name: str, is_group: bool = False, thread_id: str = "", video_url: Optional[str] = None, image_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+        if image_url or video_url:
+            db.set_last_media(sender_id, image_url=image_url, video_url=video_url)
+
         text_clean = text.strip()
         if not text_clean:
-            return None, None
+            if image_url:
+                text_clean = "Ami ekta photo/image pathiyechi, dekhun"
+            elif video_url:
+                text_clean = "Ami ekta video pathiyechi, dekhun"
+            else:
+                return None, None
 
         cmd_name = ""
         target_name = ""
@@ -82,7 +90,7 @@ class CommandLoader:
                 target_name = self.aliases.get(cmd_name, cmd_name)
                 args = parts[1].strip() if len(parts) > 1 else ""
 
-        # 3. Standalone 1-word commands without prefix (e.g. "help", "menu", "slot")
+        # 3. Standalone commands without prefix (e.g. "help", "menu", "slot", "edit <prompt>")
         if not target_name and not has_prefix:
             words = text_clean.split()
             if len(words) == 1:
@@ -91,6 +99,10 @@ class CommandLoader:
                     cmd_name = single
                     target_name = self.aliases.get(cmd_name, cmd_name)
                     args = ""
+            elif len(words) > 1 and words[0].lower() in ("edit", "imageedit", "editor"):
+                cmd_name = words[0].lower()
+                target_name = "edit"
+                args = " ".join(words[1:])
 
         # 3b. Natural language help & command list triggers (e.g. "help cmd dekhaw", "commands list")
         if not target_name:

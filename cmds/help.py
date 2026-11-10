@@ -42,6 +42,7 @@ def on_execute(ctx: CommandContext) -> Tuple[Optional[str], Optional[str]]:
         "  • .slot            : Casino slot game\n"
         "  • .daily           : 500 free daily coins\n"
         "  • .balance         : Wallet balance\n"
+        "  • .edit <prompt>   : AI Photo Editor (Anime, BG, Cyberpunk)\n"
         "  • .img <prompt>    : AI 4K image generate\n"
         "  • .alldl <link>    : Video downloader\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"

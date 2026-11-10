@@ -1,3 +1,4 @@
+import os
 import json
 import logging
 import re
@@ -40,6 +41,8 @@ AVAILABLE TOOLS:
   params: {}
 - "edit_video": Edit a video into 9:16 vertical Reels format (with blurred background), trim, speed up, or render. If user sent a video attachment or link, use this tool.
   params: {"video_url": "<url_if_provided_or_empty>", "instruction": "<edit_instruction_such_as_reels_9:16_or_speed>"}
+- "edit_image": Edit an image/photo using AI based on user prompt (such as 'make it anime', 'cyberpunk', 'change background to space', 'aesthetic artwork'). Use whenever user asks to edit an image/photo or says 'image edit koro', 'chobi edit koro', 'photo edit koro'.
+  params: {"image_url": "<url_if_provided_or_empty>", "prompt": "<editing_prompt>"}
 - "codespace_exec": Run a specific Linux shell/bash command in the 8GB RAM Codespace VM. ALWAYS provide a valid Linux command (e.g. "free -h && uptime -p", "uname -a", "df -h", "ffmpeg -version"). ONLY use when user explicitly asks to run a shell/terminal/bash command. DO NOT use this when user talks about OTP, code, or emails!
   params: {"command": "<valid_linux_bash_command>"}
 - "codespace_switch": Switch active burner account (1 to 7).
@@ -64,6 +67,8 @@ AVAILABLE TOOLS:
   params: {}
 
 If the user is just asking a question, greeting, or chatting, respond directly in friendly, concise Banglish without JSON.
+If the user just sent an image/photo (or message says 'Ami ekta photo/image pathiyechi, dekhun') without a specific edit request, DO NOT call edit_image. Acknowledge receiving the image warmly in Banglish and suggest what you can do (e.g. 'Photo ta peyechi! Ki dhoroner edit korte chan? Bolun: anime style, cyberpunk, background change, ba .edit <prompt>').
+If the user just sent a video without instructions, acknowledge receiving it and ask if they want it converted to 9:16 Reels.
 """
 
 def sanitize_banglish(text: str) -> str:
@@ -104,8 +109,10 @@ class AutonomousAIAgent:
         text_clean = text.strip()
         if video_url:
             self.last_user_videos[sender_id] = video_url
+            db.set_last_media(sender_id, video_url=video_url)
         if image_url:
             self.last_user_images[sender_id] = image_url
+            db.set_last_media(sender_id, image_url=image_url)
 
         # 1. Record incoming user message in conversation history
         db.add_chat_message(sender_id, "user", text_clean)
@@ -118,8 +125,11 @@ class AutonomousAIAgent:
         is_super = db.is_super_admin(sender_id)
         credits = db.get_credits(sender_id)
         user_email = db.get_user_email(sender_id) or "None"
-        cached_video = self.last_user_videos.get(sender_id, "None")
-        cached_image = self.last_user_images.get(sender_id, "None")
+
+        # Load persisted media if not present in runtime cache
+        persisted_media = db.get_last_media(sender_id)
+        cached_video = video_url or self.last_user_videos.get(sender_id) or persisted_media.get("video_url") or "None"
+        cached_image = image_url or self.last_user_images.get(sender_id) or persisted_media.get("image_url") or "None"
 
         context_prompt = (
             f"[USER CONTEXT: Name={sender_name}, UID={sender_id}, IsAdmin={is_admin}, "
@@ -147,8 +157,12 @@ class AutonomousAIAgent:
         action = tool_call.get("action", "")
         params = tool_call.get("params", {})
         # If edit_video is triggered without explicit url, check cached video
-        if action == "edit_video" and not params.get("video_url") and sender_id in self.last_user_videos:
-            params["video_url"] = self.last_user_videos[sender_id]
+        if action == "edit_video" and not params.get("video_url"):
+            params["video_url"] = cached_video if cached_video != "None" else ""
+
+        # If edit_image is triggered without explicit url, check cached image
+        if action == "edit_image" and not params.get("image_url"):
+            params["image_url"] = cached_image if cached_image != "None" else ""
 
         logger.info(f"AI Agent executing tool: {action} with params {params}")
 
@@ -312,6 +326,39 @@ class AutonomousAIAgent:
                     f"{credit_notice}",
                     None
                 )
+
+        # ─────────────────────────────────────────────────────────────
+        # TOOL 2b: EDIT IMAGE (AI Image Editor via azadx69x)
+        # ─────────────────────────────────────────────────────────────
+        if action == "edit_image":
+            img_url = params.get("image_url", "").strip()
+            prompt = params.get("prompt", "enhance and make it aesthetic anime artwork").strip()
+            if not img_url or img_url == "None":
+                persisted = db.get_last_media(sender_id)
+                img_url = self.last_user_images.get(sender_id) or persisted.get("image_url")
+
+            if not img_url:
+                return (
+                    "⚠️ **Kono Photo ba Image Paini!**\n"
+                    "━━━━━━━━━━━━━━━━━━━\n"
+                    "Messenger-e ekta photo pathan ba photo-r link din, tarpor bolun 'ei image ta edit kore dao'!"
+                ), None
+
+            from cmds.edit import edit_image_via_api
+            local_img = edit_image_via_api(img_url, prompt)
+            if not local_img or not os.path.exists(local_img):
+                return "❌ Image edit korte shomoshya hoyeche, please ektu por abar cheshta korun.", None
+
+            from video_engine import VideoEngine
+            catbox_url = VideoEngine.upload_to_catbox(local_img)
+            media_target = catbox_url if catbox_url else f"image_file:{local_img}"
+            return (
+                f"✨ **AI Image Edit Complete!** 🎨\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 **Prompt:** {prompt}\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"💡 Kemon hoyeche janaben!{credit_notice}"
+            ), media_target
 
         # ─────────────────────────────────────────────────────────────
         # TOOL 3: CODESPACE SWITCH

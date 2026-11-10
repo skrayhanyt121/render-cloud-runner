@@ -268,29 +268,46 @@ class FastMessengerEngine:
                 all_ok = False
         return all_ok
 
-    def send_image(self, recipient_id: str, image_url: str, caption: str = ""):
-        """Deliver image attachment."""
+    def send_image(self, recipient_id: str, image_path_or_url: str, caption: str = ""):
+        """Deliver image attachment via direct URL or local multipart file upload."""
         if caption:
             self.send_text(recipient_id, caption)
-        try:
-            r = self.session.post(
-                f"https://graph.facebook.com/v20.0/me/messages?access_token={self.page_token}",
-                json={
-                    "recipient": {"id": recipient_id},
-                    "messaging_type": "RESPONSE",
-                    "message": {
-                        "attachment": {
-                            "type": "image",
-                            "payload": {"url": image_url, "is_reusable": True}
+
+        if image_path_or_url.startswith("http://") or image_path_or_url.startswith("https://"):
+            try:
+                r = self.session.post(
+                    f"https://graph.facebook.com/v20.0/me/messages?access_token={self.page_token}",
+                    json={
+                        "recipient": {"id": recipient_id},
+                        "messaging_type": "RESPONSE",
+                        "message": {
+                            "attachment": {
+                                "type": "image",
+                                "payload": {"url": image_path_or_url, "is_reusable": True}
+                            }
                         }
-                    }
-                },
-                timeout=15
-            )
-            return r.status_code == 200
-        except Exception as e:
-            logger.error(f"send_image error: {e}")
-            return False
+                    },
+                    timeout=15
+                )
+                return r.status_code == 200
+            except Exception as e:
+                logger.error(f"send_image url error: {e}")
+                return False
+        else:
+            # Local image file upload via multipart/form-data
+            try:
+                url = f"https://graph.facebook.com/v20.0/me/messages?access_token={self.page_token}"
+                data = {
+                    "recipient": json.dumps({"id": recipient_id}),
+                    "message": json.dumps({"attachment": {"type": "image", "payload": {"is_reusable": True}}})
+                }
+                with open(image_path_or_url, "rb") as f:
+                    files = {"filedata": (os.path.basename(image_path_or_url), f, "image/png")}
+                    r = requests.post(url, data=data, files=files, timeout=40)
+                    return r.status_code == 200
+            except Exception as e:
+                logger.error(f"send_image local file error: {e}")
+                return False
 
     def send_video(self, recipient_id: str, video_path_or_url: str, caption: str = ""):
         """Deliver video attachment via direct URL or multipart file upload."""
@@ -319,7 +336,6 @@ class FastMessengerEngine:
                 return False
         else:
             # Local video file upload via multipart/form-data
-            import requests as py_requests
             try:
                 url = f"https://graph.facebook.com/v20.0/me/messages?access_token={self.page_token}"
                 data = {
@@ -328,7 +344,7 @@ class FastMessengerEngine:
                 }
                 with open(video_path_or_url, "rb") as f:
                     files = {"filedata": (os.path.basename(video_path_or_url), f, "video/mp4")}
-                    r = py_requests.post(url, data=data, files=files, timeout=60)
+                    r = requests.post(url, data=data, files=files, timeout=60)
                     if r.status_code != 200:
                         logger.error(f"send_video file upload error [{r.status_code}]: {r.text}")
                     return r.status_code == 200
@@ -360,6 +376,9 @@ class FastMessengerEngine:
                 if media_url.startswith("video_file:"):
                     actual_path = media_url.replace("video_file:", "").strip()
                     self.send_video(sender_id, actual_path, caption=reply_text)
+                elif media_url.startswith("image_file:"):
+                    actual_path = media_url.replace("image_file:", "").strip()
+                    self.send_image(sender_id, actual_path, caption=reply_text)
                 elif any(media_url.lower().endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".webm")) or "video" in media_url.lower():
                     self.send_video(sender_id, media_url, caption=reply_text)
                 else:
@@ -375,7 +394,7 @@ class FastMessengerEngine:
 
     def poll_once(self):
         """Fast polling check (runs every 1 second)."""
-        url = f"https://graph.facebook.com/v20.0/{self.page_id}/conversations?fields=messages{{message,from,id,created_time,attachments{{type,payload}}}}&limit=3&access_token={self.page_token}"
+        url = f"https://graph.facebook.com/v20.0/{self.page_id}/conversations?fields=messages{{message,from,id,created_time,attachments{{type,payload,image_data,video_data}}}}&limit=4&access_token={self.page_token}"
         try:
             r = self.session.get(url, timeout=4)
             if r.status_code != 200:
@@ -422,24 +441,44 @@ class FastMessengerEngine:
                     except Exception:
                         pass
 
-                # Extract attachments (video, image) if any
+                # Extract attachments (video, image) with comprehensive path checking
                 attachments = latest_msg.get("attachments", {}).get("data", [])
                 video_url = None
                 image_url = None
                 for att in attachments:
-                    att_type = att.get("type", "")
-                    if att_type == "video":
-                        video_url = att.get("payload", {}).get("url")
-                    elif att_type == "image":
-                        image_url = att.get("payload", {}).get("url")
+                    att_type = str(att.get("type", "")).lower()
+                    v_data = att.get("video_data") or {}
+                    i_data = att.get("image_data") or {}
+                    p_data = att.get("payload") or {}
 
-                # If user sent a video without text, give a default prompt
-                if not text and video_url:
-                    text = "Ei video ta edit kore 9:16 reels baniye dao"
+                    v_cand = v_data.get("url") or (p_data.get("url") if att_type == "video" else None)
+                    i_cand = i_data.get("url") or (p_data.get("url") if att_type in ("image", "photo") else None)
 
-                # If user sent an image without text, give a default prompt
+                    if v_cand and not video_url:
+                        video_url = v_cand
+                    if i_cand and not image_url:
+                        image_url = i_cand
+
+                # Fallback: Scan prior turns from user in current conversation if media was sent in preceding message
+                if not video_url and not image_url and len(messages) > 1:
+                    for prev_m in messages[1:4]:
+                        if prev_m.get("from", {}).get("id") == sender_id:
+                            for prev_att in prev_m.get("attachments", {}).get("data", []):
+                                p_type = str(prev_att.get("type", "")).lower()
+                                prev_v = prev_att.get("video_data", {}).get("url") or (prev_att.get("payload", {}).get("url") if p_type == "video" else None)
+                                prev_i = prev_att.get("image_data", {}).get("url") or (prev_att.get("payload", {}).get("url") if p_type in ("image", "photo") else None)
+                                if prev_v and not video_url:
+                                    video_url = prev_v
+                                if prev_i and not image_url:
+                                    image_url = prev_i
+                            if video_url or image_url:
+                                break
+
+                # If user sent media without text, provide a natural greeting prompt
                 if not text and image_url:
                     text = "Ami ekta image pathiyechi, dekhun"
+                elif not text and video_url:
+                    text = "Ami ekta video pathiyechi, dekhun"
 
                 if not text and not video_url and not image_url:
                     continue
