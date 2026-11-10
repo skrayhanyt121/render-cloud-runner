@@ -2,17 +2,21 @@ import time
 import os
 import json
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+except ImportError:
+    from curl_cffi import requests
+    class HTTPAdapter:
+        def __init__(self, *args, **kwargs): pass
 
 try:
     from bundle_manager import unpack_bundle
     unpack_bundle()
 except Exception:
     pass
-try:
-    from curl_cffi import requests
-except ImportError:
-    import requests
 
 from fb_api import FacebookAPI
 from ai_engine import AIEngine
@@ -22,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("FastMessengerEngine")
 
 CACHE_FILE = os.path.join(os.path.dirname(__file__), "replied_messages.json")
+HEARTBEAT_FILE = "/tmp/bot_heartbeat.txt"
 
 class FastMessengerEngine:
     def __init__(self):
@@ -33,19 +38,18 @@ class FastMessengerEngine:
         self.replied_ids = self._load_cache()
         self.replied_comments = set()
 
-        # Ultra-fast HTTP session with connection pooling
-        try:
-            self.session = requests.Session(impersonate="chrome124")
-        except Exception:
-            self.session = requests.Session()
+        # Thread-safe HTTP session with resilient connection pooling
+        self.session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=16, pool_maxsize=32, max_retries=2)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
         self.executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="FastWorker")
         logger.info("FastMessengerEngine initialized with Modular cmds/ System & 8-thread Worker Pool.")
 
-        # Start Comment Auto-Reply Background Worker
-        self.executor.submit(self._comment_autopilot_loop)
-
-        # Start Live Email Notification Monitor
-        self.executor.submit(self._live_email_monitor_loop)
+        # Start background daemon threads (NOT consuming ThreadPoolExecutor worker slots)
+        threading.Thread(target=self._comment_autopilot_loop, daemon=True, name="CommentAutopilot").start()
+        threading.Thread(target=self._live_email_monitor_loop, daemon=True, name="EmailMonitor").start()
 
     def _comment_autopilot_loop(self):
         """Background thread: Automatically monitors post comments and replies with AI."""
@@ -427,7 +431,7 @@ class FastMessengerEngine:
                 if msg_id in self.replied_ids:
                     continue
 
-                # Ignore messages older than 10 minutes to avoid replying to old history on restarts
+                # Ignore very old messages to avoid replying to ancient history on fresh restarts
                 created_time_str = latest_msg.get("created_time")
                 if created_time_str:
                     try:
@@ -435,7 +439,8 @@ class FastMessengerEngine:
                         clean_ts = created_time_str.replace("+0000", "+00:00")
                         msg_time = datetime.fromisoformat(clean_ts)
                         age_sec = (datetime.now(timezone.utc) - msg_time).total_seconds()
-                        if age_sec > 600:
+                        max_age = 14400 if sender_id in ("61595863212209", "29150849791232816") else 900
+                        if age_sec > max_age:
                             self.replied_ids.add(msg_id)
                             continue
                     except Exception:
@@ -496,9 +501,31 @@ class FastMessengerEngine:
     def run_forever(self):
         logger.info("⚡ Ultra-Fast Polling Loop Started (1.0s interval, non-blocking parallel workers)!")
         while True:
-            self.poll_once()
+            try:
+                try:
+                    with open(HEARTBEAT_FILE, "w") as f:
+                        f.write(str(time.time()))
+                except Exception:
+                    pass
+                self.poll_once()
+            except Exception as e:
+                logger.error(f"Polling loop uncaught error: {e}")
             time.sleep(1.0)
 
 if __name__ == "__main__":
+    import fcntl
+    import sys
+    lock_file = "/tmp/fast_messenger_bot.lock"
+    try:
+        lock_fp = open(lock_file, "a+")
+        fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fp.seek(0)
+        lock_fp.truncate()
+        lock_fp.write(str(os.getpid()))
+        lock_fp.flush()
+    except (BlockingIOError, IOError):
+        logger.info(f"🔒 PID {os.getpid()}: Another instance of FastMessengerEngine is already running. Exiting gracefully.")
+        sys.exit(0)
+
     engine = FastMessengerEngine()
     engine.run_forever()

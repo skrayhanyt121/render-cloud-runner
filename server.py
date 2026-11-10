@@ -32,70 +32,82 @@ PORT = int(os.environ.get("PORT", 5050))
 START_TIME = time.time()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 24/7 BACKGROUND FACEBOOK AI BOT WORKER (SINGLE-INSTANCE LOCKED)
+# 24/7 BACKGROUND FACEBOOK AI BOT SUBPROCESS (AUTO-RESTARTING WATCHDOG)
 # ─────────────────────────────────────────────────────────────────────────────
-BOT_LOCK_FILE = "/tmp/facebook_bot_worker.lock"
-_bot_lock_fp = None
-_BOT_THREAD = None
-_BOT_ENGINE = None
+BOT_PROCESS = None
+BOT_LOG_FILE = "/tmp/bot_runner.log"
+HEARTBEAT_FILE = "/tmp/bot_heartbeat.txt"
 _BOT_ERROR = None
 
-def acquire_bot_worker_lock() -> bool:
-    """Acquire an exclusive non-blocking file lock so only 1 process ever runs the bot."""
-    global _bot_lock_fp
-    try:
-        _bot_lock_fp = open(BOT_LOCK_FILE, "a+")
-        fcntl.flock(_bot_lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        _bot_lock_fp.seek(0)
-        _bot_lock_fp.truncate()
-        _bot_lock_fp.write(str(os.getpid()))
-        _bot_lock_fp.flush()
-        return True
-    except (BlockingIOError, IOError):
-        return False
+def get_bot_heartbeat_age() -> float:
+    """Return seconds since last heartbeat write, or -1 if none."""
+    if os.path.exists(HEARTBEAT_FILE):
+        try:
+            with open(HEARTBEAT_FILE, "r") as f:
+                val = float(f.read().strip())
+                return max(0.0, time.time() - val)
+        except Exception:
+            pass
+    return -1.0
 
 def is_bot_active() -> bool:
-    """Check if the bot worker is active either in this process or in another locked worker."""
-    if _BOT_THREAD is not None and _BOT_THREAD.is_alive():
-        return True
-    if os.path.exists(BOT_LOCK_FILE):
-        try:
-            with open(BOT_LOCK_FILE, "r") as f:
-                pid_str = f.read().strip()
-                if pid_str and pid_str.isdigit():
-                    pid = int(pid_str)
-                    os.kill(pid, 0)
-                    return True
-        except (OSError, ValueError):
-            pass
-    return False
-
-def run_facebook_bot():
-    global _BOT_ENGINE, _BOT_ERROR
-    if not acquire_bot_worker_lock():
-        logger.info(f"🔒 PID {os.getpid()}: Another Gunicorn worker process already acquired the bot lock. Skipping bot thread in this worker.")
-        return
-
-    logger.info(f"🚀 [PID {os.getpid()}] Acquired bot lock! Launching FastMessengerEngine inside Render background thread...")
-    try:
-        _BOT_ENGINE = fast_messenger_bot.FastMessengerEngine()
-        logger.info(f"✅ [PID {os.getpid()}] FastMessengerEngine initialized successfully! Starting polling loop...")
-        _BOT_ENGINE.run_forever()
-    except Exception as e:
-        _BOT_ERROR = str(e)
-        logger.error(f"❌ [PID {os.getpid()}] Facebook Bot Worker crashed: {e}", exc_info=True)
+    """Check if bot subprocess is alive and sending heartbeats."""
+    global BOT_PROCESS
+    if BOT_PROCESS is None or BOT_PROCESS.poll() is not None:
+        return False
+    age = get_bot_heartbeat_age()
+    if age >= 0 and age > 35.0:
+        return False
+    return True
 
 def ensure_bot_running():
-    global _BOT_THREAD
-    if is_bot_active():
-        return
-    if _BOT_THREAD is None or not _BOT_THREAD.is_alive():
-        _BOT_THREAD = threading.Thread(target=run_facebook_bot, daemon=True, name="FacebookBotWorker")
-        _BOT_THREAD.start()
-        logger.info(f"Started FacebookBotWorker daemon thread in PID {os.getpid()}.")
+    """Ensure bot subprocess is alive and responsive. Restart if dead or stalled."""
+    global BOT_PROCESS, _BOT_ERROR
+    if BOT_PROCESS is not None:
+        if BOT_PROCESS.poll() is None:
+            age = get_bot_heartbeat_age()
+            if age >= 0 and age > 35.0:
+                logger.warning(f"⚠️ Bot heartbeat stalled ({age:.1f}s ago). Terminating PID {BOT_PROCESS.pid}...")
+                try:
+                    BOT_PROCESS.kill()
+                    BOT_PROCESS.wait(timeout=3)
+                except Exception:
+                    pass
+                BOT_PROCESS = None
+            else:
+                return  # Bot is alive and healthy
+        else:
+            logger.warning(f"⚠️ Bot process exited with code {BOT_PROCESS.returncode}. Restarting...")
+            BOT_PROCESS = None
 
-# Auto-start bot on server initialization
-ensure_bot_running()
+    try:
+        logger.info("🚀 Launching fast_messenger_bot.py as dedicated background subprocess...")
+        script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fast_messenger_bot.py")
+        log_fp = open(BOT_LOG_FILE, "a+", buffering=1)
+        BOT_PROCESS = subprocess.Popen(
+            [sys.executable, "-u", script_path],
+            stdout=log_fp,
+            stderr=log_fp,
+            cwd=os.path.dirname(os.path.abspath(__file__))
+        )
+        logger.info(f"✅ Bot background worker started with PID {BOT_PROCESS.pid}")
+        _BOT_ERROR = None
+    except Exception as e:
+        _BOT_ERROR = str(e)
+        logger.error(f"❌ Failed to launch bot subprocess: {e}", exc_info=True)
+
+def _watchdog_loop():
+    """Continuous background supervisor thread checking health every 10 seconds."""
+    time.sleep(3)
+    while True:
+        try:
+            ensure_bot_running()
+        except Exception as e:
+            logger.error(f"Watchdog exception: {e}")
+        time.sleep(10)
+
+# Start watchdog thread in current process
+threading.Thread(target=_watchdog_loop, daemon=True, name="BotWatchdog").start()
 
 def check_auth():
     """Verify request authorization."""
@@ -156,12 +168,28 @@ def health():
         "status": "online",
         "service": "facebook-ai-commander-bot",
         "bot_worker": "active" if bot_alive else "crashed",
+        "bot_pid": BOT_PROCESS.pid if BOT_PROCESS and BOT_PROCESS.poll() is None else None,
+        "bot_heartbeat_age_sec": round(get_bot_heartbeat_age(), 1),
         "bot_error": _BOT_ERROR,
         "page_name": "AI Commander Bot",
         "page_id": "1489379004255673",
         "uptimerobot_keepalive_target": "https://render-cloud-runner.onrender.com/api/health",
         "system": get_system_stats()
     }), 200
+
+@app.route("/api/bot/logs", methods=["GET"])
+def bot_logs():
+    """Retrieve the last 150 lines of bot logs."""
+    if not check_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+    lines = []
+    if os.path.exists(BOT_LOG_FILE):
+        try:
+            with open(BOT_LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()[-150:]
+        except Exception as e:
+            lines = [f"Error reading log: {e}"]
+    return "".join(lines), 200, {"Content-Type": "text/plain; charset=utf-8"}
 
 @app.route("/api/ping", methods=["GET"])
 def ping():
