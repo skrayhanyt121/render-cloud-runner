@@ -97,12 +97,15 @@ class AutonomousAIAgent:
     def __init__(self, fb_api):
         self.fb = fb_api
         self.last_user_videos: Dict[str, str] = {}
+        self.last_user_images: Dict[str, str] = {}
 
-    def process_message(self, text: str, sender_id: str, sender_name: str, video_url: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    def process_message(self, text: str, sender_id: str, sender_name: str, video_url: Optional[str] = None, image_url: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """Processes message through the Autonomous Agent reasoning loop with persistent multi-turn memory."""
         text_clean = text.strip()
         if video_url:
             self.last_user_videos[sender_id] = video_url
+        if image_url:
+            self.last_user_images[sender_id] = image_url
 
         # 1. Record incoming user message in conversation history
         db.add_chat_message(sender_id, "user", text_clean)
@@ -116,10 +119,12 @@ class AutonomousAIAgent:
         credits = db.get_credits(sender_id)
         user_email = db.get_user_email(sender_id) or "None"
         cached_video = self.last_user_videos.get(sender_id, "None")
+        cached_image = self.last_user_images.get(sender_id, "None")
 
         context_prompt = (
             f"[USER CONTEXT: Name={sender_name}, UID={sender_id}, IsAdmin={is_admin}, "
-            f"IsSuperAdmin={is_super}, Credits={credits}, ActiveGmail={user_email}, LastVideoProvided={cached_video}]\n"
+            f"IsSuperAdmin={is_super}, Credits={credits}, ActiveGmail={user_email}, "
+            f"LastVideoProvided={cached_video}, LastImageProvided={cached_image}]\n"
             f"User Message: {text_clean}"
         )
 

@@ -9,6 +9,9 @@ from typing import List, Optional, Dict, Any
 logger = logging.getLogger("GeminiKeyManager")
 KEYS_FILE = os.path.join(os.path.dirname(__file__), "gemini_keys.json")
 
+# Verified working models in order of priority
+SUPPORTED_MODELS = ["gemini-flash-lite-latest", "gemini-flash-latest", "gemini-2.5-flash"]
+
 class GeminiKeyManager:
     def __init__(self):
         self.keys: List[str] = self.load_keys()
@@ -48,8 +51,8 @@ class GeminiKeyManager:
         system_instruction: Optional[str] = None
     ) -> str:
         """
-        Generate response via official Gemini Flash API with multi-turn conversation memory,
-        automatic key rotation, and resilient fallback.
+        Generate response via official Gemini API with multi-turn conversation memory,
+        verified working models, automatic key rotation, and resilient fallback.
         """
         if not self.keys:
             return self._instant_fallback(prompt, user_name)
@@ -94,44 +97,48 @@ class GeminiKeyManager:
                 "parts": [{"text": system_instruction}]
             }
 
-        # Try available keys with automatic rotation on rate-limit / network error
-        num_attempts = max(1, len(self.keys))
-        for attempt in range(num_attempts):
-            key = self.get_next_key()
-            if not key:
-                break
+        # Try supported models and all keys
+        for model in SUPPORTED_MODELS:
+            num_keys = max(1, len(self.keys))
+            for attempt in range(num_keys):
+                key = self.get_next_key()
+                if not key:
+                    break
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
-            try:
-                body = json.dumps(payload).encode("utf-8")
-                req = urllib.request.Request(
-                    url,
-                    data=body,
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=15) as resp:
-                    if resp.status == 200:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        candidates = data.get("candidates", [])
-                        if candidates:
-                            text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                            if text:
-                                return text.strip()
-            except urllib.error.HTTPError as he:
-                err_text = ""
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
                 try:
-                    err_text = he.read().decode("utf-8")[:160]
-                except Exception:
-                    pass
-                logger.warning(f"Gemini Key [attempt {attempt+1}] returned HTTP {he.code}: {err_text}")
-                if he.code in (429, 403):
-                    # Rate limit or quota exceeded, try next key immediately
-                    continue
-            except Exception as e:
-                logger.error(f"Gemini API call failed [attempt {attempt+1}]: {e}")
+                    body = json.dumps(payload).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        if resp.status == 200:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            candidates = data.get("candidates", [])
+                            if candidates:
+                                text = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                                if text:
+                                    return text.strip()
+                except urllib.error.HTTPError as he:
+                    err_text = ""
+                    try:
+                        err_text = he.read().decode("utf-8")[:160]
+                    except Exception:
+                        pass
+                    logger.warning(f"Gemini [{model}] Key {attempt+1} returned HTTP {he.code}: {err_text}")
+                    if he.code in (404, 400):
+                        # Model not supported on this endpoint, try next model
+                        break
+                    if he.code in (429, 403, 503):
+                        # Rate limit or quota or busy, try next key
+                        continue
+                except Exception as e:
+                    logger.error(f"Gemini API call failed [{model}] key {attempt+1}: {e}")
 
-        # Fallback if all API keys fail
+        # Fallback if all API keys and models fail
         return self._instant_fallback(prompt, user_name)
 
     def _instant_fallback(self, prompt: str, user_name: str) -> str:
@@ -140,9 +147,9 @@ class GeminiKeyManager:
         if any(p.startswith(g) or p == g for g in greetings):
             options = [
                 f"Hello {user_name} bhai! 👋 Shob kisu kemon cholche?",
-                f"Hey {user_name}! 👋 Bolun apnar jonno ajke ki korte pari?",
+                f"Hey {user_name}! 👋 Bolun ajke ki kaj korben?",
                 f"Walaikum Assalam {user_name} bhai! ❤️ Kemon achen?",
-                f"Hi {user_name}! 🤖 Ami online achi, kono help lagle janan!"
+                f"Hi {user_name}! 🤖 Ami online achi, janan ki lagbe!"
             ]
             return random.choice(options)
         elif "ki korte paro" in p:
@@ -152,6 +159,6 @@ class GeminiKeyManager:
         elif "dhonnobad" in p or "thanks" in p or "thank you" in p:
             return f"You're welcome, {user_name} bhai! ❤️ Shobshomoy pashe achi."
         else:
-            return f"Ji {user_name} bhai! Ami apnar kotha bujhte perechi. Apnar proshno niye kono specific command use korte paren ba '.help' likhe shob commands dekhe nin! 🚀"
+            return f"Ji {user_name} bhai! Ami apnar kotha bujhte perechi. Apni specific kono kaj korte chaile bolun, ami kore dibo! 🚀"
 
 gemini_manager = GeminiKeyManager()

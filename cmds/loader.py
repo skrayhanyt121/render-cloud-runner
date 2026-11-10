@@ -54,7 +54,7 @@ class CommandLoader:
 
         logger.info(f"Successfully loaded {len(self.commands)} modular commands!")
 
-    def dispatch(self, text: str, sender_id: str, sender_name: str, is_group: bool = False, thread_id: str = "", video_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
+    def dispatch(self, text: str, sender_id: str, sender_name: str, is_group: bool = False, thread_id: str = "", video_url: Optional[str] = None, image_url: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         text_clean = text.strip()
         if not text_clean:
             return None, None
@@ -154,4 +154,4 @@ class CommandLoader:
                 return f"❌ Command .{target_name} execution error: {e}", None
 
         # 5. Autonomous AI Agent (Natural Language Reasoning, Cloud Codespaces, Posts & Tools Control)
-        return self.ai_agent.process_message(text_clean, sender_id, sender_name, video_url=video_url)
+        return self.ai_agent.process_message(text_clean, sender_id, sender_name, video_url=video_url, image_url=image_url)

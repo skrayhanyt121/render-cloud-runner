@@ -336,10 +336,10 @@ class FastMessengerEngine:
                 logger.error(f"send_video local file error: {e}")
                 return False
 
-    def handle_message_async(self, sender_id: str, sender_name: str, text: str, msg_id: str, is_group: bool = False, thread_id: str = "", video_url: str = None):
+    def handle_message_async(self, sender_id: str, sender_name: str, text: str, msg_id: str, is_group: bool = False, thread_id: str = "", video_url: str = None, image_url: str = None):
         """Worker thread handler: processes modular commands & AI without blocking the listener."""
         t_start = time.time()
-        logger.info(f"[WORKER] Starting async job for {sender_name} ('{text}') [Video: {bool(video_url)}]")
+        logger.info(f"[WORKER] Starting async job for {sender_name} ('{text}') [Video: {bool(video_url)}, Image: {bool(image_url)}]")
 
         # 1. Show instant typing bubble
         self.send_typing_indicator(sender_id)
@@ -352,7 +352,8 @@ class FastMessengerEngine:
                 sender_name=sender_name,
                 is_group=is_group,
                 thread_id=thread_id,
-                video_url=video_url
+                video_url=video_url,
+                image_url=image_url
             )
 
             if media_url:
@@ -424,17 +425,23 @@ class FastMessengerEngine:
                 # Extract attachments (video, image) if any
                 attachments = latest_msg.get("attachments", {}).get("data", [])
                 video_url = None
+                image_url = None
                 for att in attachments:
                     att_type = att.get("type", "")
                     if att_type == "video":
                         video_url = att.get("payload", {}).get("url")
-                        break
+                    elif att_type == "image":
+                        image_url = att.get("payload", {}).get("url")
 
                 # If user sent a video without text, give a default prompt
                 if not text and video_url:
                     text = "Ei video ta edit kore 9:16 reels baniye dao"
 
-                if not text and not video_url:
+                # If user sent an image without text, give a default prompt
+                if not text and image_url:
+                    text = "Ami ekta image pathiyechi, dekhun"
+
+                if not text and not video_url and not image_url:
                     continue
 
                 # Mark processed in cache immediately
@@ -442,7 +449,7 @@ class FastMessengerEngine:
                 self._save_cache()
 
                 # Dispatch to background thread pool immediately!
-                self.executor.submit(self.handle_message_async, sender_id, sender_name, text, msg_id, is_group, thread_id, video_url)
+                self.executor.submit(self.handle_message_async, sender_id, sender_name, text, msg_id, is_group, thread_id, video_url, image_url)
 
         except Exception as e:
             logger.error(f"poll_once error: {e}")
